@@ -34,7 +34,7 @@ resource "google_project_iam_member" "scheduler_compute_admin" {
 resource "google_cloud_scheduler_job" "start_core" {
   name        = "start-5g-core"
   description = "Start 5G core VM at 9am WAT daily"
-  schedule    = "0 8 * * *"
+  schedule    = "0 9 * * *"
   time_zone   = "Africa/Lagos"
   region      = "us-central1"
 
@@ -53,7 +53,7 @@ resource "google_cloud_scheduler_job" "start_core" {
 resource "google_cloud_scheduler_job" "start_ueransim" {
   name        = "start-ueransim"
   description = "Start UERANSIM VM at 9am WAT daily"
-  schedule    = "0 8 * * *"
+  schedule    = "0 9 * * *"
   time_zone   = "Africa/Lagos"
   region      = "us-central1"
 
@@ -74,7 +74,7 @@ resource "google_cloud_scheduler_job" "start_ueransim" {
 resource "google_cloud_scheduler_job" "stop_core" {
   name        = "stop-5g-core"
   description = "Stop 5G core VM at 3pm WAT daily"
-  schedule    = "0 14 * * *"
+  schedule    = "0 15 * * *"
   time_zone   = "Africa/Lagos"
   region      = "us-central1"
 
@@ -93,7 +93,7 @@ resource "google_cloud_scheduler_job" "stop_core" {
 resource "google_cloud_scheduler_job" "stop_ueransim" {
   name        = "stop-ueransim"
   description = "Stop UERANSIM VM at 3pm WAT daily"
-  schedule    = "0 14 * * *"
+  schedule    = "0 15 * * *"
   time_zone   = "Africa/Lagos"
   region      = "us-central1"
 
