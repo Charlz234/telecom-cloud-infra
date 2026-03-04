@@ -42,8 +42,16 @@ resource "google_compute_instance" "core_5g" {
     ssh-keys = "${var.ssh_user}:${local.ssh_public_key}"
     startup-script = <<-EOF
       #!/bin/bash
-      set -e
+      set -e 
       exec > /var/log/startup-script.log 2>&1
+      # ---- First Boot Check ----
+      INIT_FLAG="/var/lib/startup-complete"
+      if [ -f "$INIT_FLAG" ]; then
+         echo "Already initialized — starting services only"
+         systemctl start free5gc || true
+         exit 0
+      fi
+      
 
       echo "=== Starting 5G Core VM setup ==="
 
@@ -117,6 +125,7 @@ SVCEOF
 
       echo "=== 5G Core VM setup complete ===" >> /home/ubuntu/ready.txt
       chown ubuntu:ubuntu /home/ubuntu/ready.txt
+      touch /var/lib/startup-complete
     EOF
   }
 
@@ -167,6 +176,15 @@ resource "google_compute_instance" "ueransim" {
       #!/bin/bash
       set -e
       exec > /var/log/startup-script.log 2>&1
+            # ---- First Boot Check ----
+      INIT_FLAG="/var/lib/startup-complete"
+      if [ -f "$INIT_FLAG" ]; then
+         echo "Already initialized — starting services only"
+         systemctl start ueransim-gnb || true
+         systemctl start ueransim-ue || true
+         exit 0
+      fi
+      
 
       echo "=== Starting UERANSIM VM setup ==="
 
@@ -245,6 +263,7 @@ SVCEOF
 
       echo "=== UERANSIM VM setup complete ===" >> /home/ubuntu/ready.txt
       chown ubuntu:ubuntu /home/ubuntu/ready.txt
+      touch /var/lib/startup-complete
     EOF
   }
 
