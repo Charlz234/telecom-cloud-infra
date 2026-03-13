@@ -59,6 +59,7 @@ variable "ubuntu_image" {
   description = "Ubuntu 22.04 LTS image"
   type        = string
   default     = "ubuntu-os-cloud/ubuntu-2204-lts"
+
 }
 
 # ============================================

@@ -8,7 +8,7 @@ core_machine_type     = "t2d-standard-4"
 ueransim_machine_type = "t2d-standard-2"
 core_disk_size_gb     = 50
 ueransim_disk_size_gb = 30
-ubuntu_image          = "ubuntu-os-cloud/ubuntu-2004-lts"
+ubuntu_image          = "ubuntu-os-cloud/ubuntu-2204-lts"
 
 # OCI
 oci_tenancy_ocid        = "ocid1.tenancy.oc1..xxxxx"

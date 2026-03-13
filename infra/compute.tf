@@ -13,10 +13,11 @@ locals {
 #       Grafana, k3s, Cilium, ArgoCD
 # ============================================
 resource "google_compute_instance" "core_5g" {
-  name         = "core-5g"
-  machine_type = var.core_machine_type
-  zone         = var.gcp_zone
-  tags         = ["lab-vm"]
+  name           = "core-5g"
+  machine_type   = var.core_machine_type
+  zone           = var.gcp_zone
+  can_ip_forward = true
+  tags           = ["lab-vm"]
 
   scheduling {
     preemptible         = true
@@ -42,24 +43,22 @@ resource "google_compute_instance" "core_5g" {
     ssh-keys = "${var.ssh_user}:${local.ssh_public_key}"
     startup-script = <<-EOF
       #!/bin/bash
-      set -e 
+      set -e
       exec > /var/log/startup-script.log 2>&1
+
       # ---- First Boot Check ----
       INIT_FLAG="/var/lib/startup-complete"
       if [ -f "$INIT_FLAG" ]; then
-         echo "Already initialized — starting services only"
-         systemctl start free5gc || true
-         exit 0
+        echo "Already initialized — starting services only"
+        systemctl start free5gc || true
+        exit 0
       fi
-      
 
       echo "=== Starting 5G Core VM setup ==="
 
-      # System updates
+      # ---- System Updates ----
       apt-get update -y
-      apt-get install -y \
-        docker.io \
-        docker-compose \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
         git \
         curl \
         wget \
@@ -68,38 +67,67 @@ resource "google_compute_instance" "core_5g" {
         net-tools \
         iproute2 \
         iptables \
+        linux-headers-$(uname -r) \
+        build-essential \
+        gcc-12
         jq
 
-      # Enable Docker
+      # ---- Docker (official repo — includes compose plugin) ----
+      curl -fsSL https://get.docker.com | sh
+      apt-get install -y docker-compose-plugin
       systemctl enable docker
       systemctl start docker
       usermod -aG docker ubuntu
 
-      # Install Go 1.21
-      wget -q https://go.dev/dl/go1.21.0.linux-amd64.tar.gz -O /tmp/go.tar.gz
+      # ---- Go 1.25.5 ----
+      wget -q https://go.dev/dl/go1.25.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
       tar -C /usr/local -xzf /tmp/go.tar.gz
       echo 'export PATH=$PATH:/usr/local/go/bin' >> /home/ubuntu/.bashrc
       echo 'export GOPATH=/home/ubuntu/go' >> /home/ubuntu/.bashrc
+      echo 'export GOROOT=/usr/local/go' >> /home/ubuntu/.bashrc
       rm /tmp/go.tar.gz
 
-      # Enable IP forwarding for UPF data plane
+      # ---- IP Forwarding ----
       echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
       echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.conf
       sysctl -p
 
-      # Clone Free5GC
+      # ---- TUN Device (required for UPF) ----
+      mkdir -p /dev/net
+      mknod /dev/net/tun c 10 200 || true
+      chmod 666 /dev/net/tun
+
+      # ---- gtp5g Kernel Module (required for UPF data plane) ----
+      git clone -b v0.9.14 https://github.com/free5gc/gtp5g /tmp/gtp5g
+      cd /tmp/gtp5g
+      make
+      make install
+      echo "gtp5g" >> /etc/modules-load.d/gtp5g.conf
+      modprobe gtp5g || true
+      echo "gtp5g install status: $?" >> /var/log/startup-script.log
+
+      # ---- Clone Free5GC Compose ----
       git clone https://github.com/free5gc/free5gc-compose /home/ubuntu/free5gc-compose
       chown -R ubuntu:ubuntu /home/ubuntu/free5gc-compose
 
-      # WireGuard setup — keys generated on first boot
-      # Full config applied manually after terraform output
+      # ---- Disable built-in UERANSIM container (using external VM) ----
+      cd /home/ubuntu/free5gc-compose
+      # Add profile so ueransim container only starts when explicitly called
+      sed -i '/container_name: ueransim/{n; s/^/    profiles:\n      - local-ran\n/}' docker-compose.yaml || true
+
+      # ---- Host iptables for UPF data plane ----
+      iptables -t nat -A POSTROUTING -o ens4 -j MASQUERADE || true
+      iptables -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1400 || true
+
+      # ---- WireGuard Keys ----
+      mkdir -p /etc/wireguard
       wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/public.key
       chmod 600 /etc/wireguard/private.key
       CORE_PUBLIC_KEY=$(cat /etc/wireguard/public.key)
-      echo "5g-core WireGuard public key: $CORE_PUBLIC_KEY" >> /home/ubuntu/wireguard-keys.txt
+      echo "5g-core WireGuard public key: $CORE_PUBLIC_KEY" > /home/ubuntu/wireguard-keys.txt
       chown ubuntu:ubuntu /home/ubuntu/wireguard-keys.txt
 
-      # Systemd service — auto-restart Free5GC after preemption
+      # ---- Systemd Service — Free5GC ----
       cat > /etc/systemd/system/free5gc.service << 'SVCEOF'
 [Unit]
 Description=Free5GC 5G Core Network Functions
@@ -110,8 +138,9 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/home/ubuntu/free5gc-compose
-ExecStart=/usr/bin/docker-compose up -d
-ExecStop=/usr/bin/docker-compose down
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
 User=ubuntu
 Restart=on-failure
 RestartSec=30
@@ -123,9 +152,9 @@ SVCEOF
       systemctl daemon-reload
       systemctl enable free5gc
 
-      echo "=== 5G Core VM setup complete ===" >> /home/ubuntu/ready.txt
+      echo "=== 5G Core VM setup complete ===" | tee -a /home/ubuntu/ready.txt
       chown ubuntu:ubuntu /home/ubuntu/ready.txt
-      touch /var/lib/startup-complete
+      touch "$INIT_FLAG"
     EOF
   }
 
@@ -145,10 +174,11 @@ SVCEOF
 # Runs: UERANSIM gNB + UE, WireGuard peer
 # ============================================
 resource "google_compute_instance" "ueransim" {
-  name         = "ueransim"
-  machine_type = var.ueransim_machine_type
-  zone         = var.gcp_zone
-  tags         = ["lab-vm"]
+  name           = "ueransim"
+  machine_type   = var.ueransim_machine_type
+  zone           = var.gcp_zone
+  can_ip_forward = true
+  tags           = ["lab-vm"]
 
   scheduling {
     preemptible         = true
@@ -176,19 +206,19 @@ resource "google_compute_instance" "ueransim" {
       #!/bin/bash
       set -e
       exec > /var/log/startup-script.log 2>&1
-            # ---- First Boot Check ----
+
+      # ---- First Boot Check ----
       INIT_FLAG="/var/lib/startup-complete"
       if [ -f "$INIT_FLAG" ]; then
-         echo "Already initialized — starting services only"
-         systemctl start ueransim-gnb || true
-         systemctl start ueransim-ue || true
-         exit 0
+        echo "Already initialized — starting services only"
+        systemctl start ueransim-gnb || true
+        systemctl start ueransim-ue || true
+        exit 0
       fi
-      
 
       echo "=== Starting UERANSIM VM setup ==="
 
-      # System updates
+      # ---- System Updates ----
       apt-get update -y
       apt-get install -y \
         make \
@@ -205,19 +235,25 @@ resource "google_compute_instance" "ueransim" {
         net-tools \
         cmake
 
-      # Build UERANSIM from source
+      # ---- Load SCTP module (required for NGAP N2 interface) ----
+      modprobe sctp
+      echo "sctp" >> /etc/modules-load.d/sctp.conf
+
+      # ---- Build UERANSIM ----
       git clone https://github.com/aligungr/UERANSIM /home/ubuntu/UERANSIM
-      cd /home/ubuntu/UERANSIM && make
+      cd /home/ubuntu/UERANSIM
+      make -j$(nproc)
       chown -R ubuntu:ubuntu /home/ubuntu/UERANSIM
 
-      # WireGuard setup
+      # ---- WireGuard Keys ----
+      mkdir -p /etc/wireguard
       wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/public.key
       chmod 600 /etc/wireguard/private.key
       UERANSIM_PUBLIC_KEY=$(cat /etc/wireguard/public.key)
-      echo "ueransim WireGuard public key: $UERANSIM_PUBLIC_KEY" >> /home/ubuntu/wireguard-keys.txt
+      echo "ueransim WireGuard public key: $UERANSIM_PUBLIC_KEY" > /home/ubuntu/wireguard-keys.txt
       chown ubuntu:ubuntu /home/ubuntu/wireguard-keys.txt
 
-      # Systemd service — auto-restart gNB after preemption
+      # ---- Systemd Service — gNB ----
       cat > /etc/systemd/system/ueransim-gnb.service << 'SVCEOF'
 [Unit]
 Description=UERANSIM gNB — 5G Base Station Simulator
@@ -236,8 +272,7 @@ RestartSec=10
 WantedBy=multi-user.target
 SVCEOF
 
-      # Systemd service — auto-restart UE after preemption
-      # Starts 15 seconds after gNB to ensure gNB is ready
+      # ---- Systemd Service — UE ----
       cat > /etc/systemd/system/ueransim-ue.service << 'SVCEOF'
 [Unit]
 Description=UERANSIM UE — User Equipment Simulator
@@ -261,9 +296,9 @@ SVCEOF
       systemctl enable ueransim-gnb
       systemctl enable ueransim-ue
 
-      echo "=== UERANSIM VM setup complete ===" >> /home/ubuntu/ready.txt
+      echo "=== UERANSIM VM setup complete ===" | tee -a /home/ubuntu/ready.txt
       chown ubuntu:ubuntu /home/ubuntu/ready.txt
-      touch /var/lib/startup-complete
+      touch "$INIT_FLAG"
     EOF
   }
 
